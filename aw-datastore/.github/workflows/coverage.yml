@@ -1,0 +1,53 @@
+name: Code Coverage
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main, dev]
+
+jobs:
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aw_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: Generate coverage
+        run: |
+          cargo tarpaulin \
+            --out Xml \
+            --out Html \
+            --features sqlite,postgres \
+            --timeout 300
+        working-directory: ./aw-server-rust/aw-datastore
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/aw_test
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./aw-server-rust/aw-datastore/cobertura.xml
+          fail_ci_if_error: false
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: ./aw-server-rust/aw-datastore/tarpaulin-report.html
+          retention-days: 30

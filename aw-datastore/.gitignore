@@ -1,0 +1,33 @@
+# Git Ignore for aw-datastore
+
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+*.pdb
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test artifacts
+tarpaulin-report.html
+cobertura.xml
+coverage/
+
+# Docker
+.docker/
+*.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# OS
+.DS_Store
+Thumbs.db

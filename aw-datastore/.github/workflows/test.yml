@@ -1,0 +1,84 @@
+name: Test Suite
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main, dev]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-sqlite:
+    name: Test SQLite on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run SQLite tests
+        run: cargo test --lib --tests --features sqlite
+        working-directory: ./aw-server-rust/aw-datastore
+
+  test-postgres:
+    name: Test PostgreSQL (Ubuntu)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aw_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run PostgreSQL tests
+        run: cargo test --lib --tests --features postgres
+        working-directory: ./aw-server-rust/aw-datastore
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/aw_test
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt -- --check
+        working-directory: ./aw-server-rust/aw-datastore
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+        working-directory: ./aw-server-rust/aw-datastore
+
+  test-all:
+    name: All Tests Passed
+    runs-on: ubuntu-latest
+    needs: [test-sqlite, test-postgres, lint]
+    if: always()
+    steps:
+      - name: Check status
+        run: |
+          if [ "${{ needs.test-sqlite.result }}" != "success" ] || \
+             [ "${{ needs.test-postgres.result }}" != "success" ] || \
+             [ "${{ needs.lint.result }}" != "success" ]; then
+            exit 1
+          fi

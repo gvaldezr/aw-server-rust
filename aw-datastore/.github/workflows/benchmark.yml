@@ -1,0 +1,50 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [master, main, dev]
+  pull_request:
+    branches: [master, main, dev]
+  schedule:
+    - cron: '0 2 * * 1'  # Weekly on Mondays at 2 AM UTC
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: aw_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run SQLite benchmarks
+        run: cargo bench --features sqlite --no-run
+        working-directory: ./aw-server-rust/aw-datastore
+      - name: Run PostgreSQL benchmarks
+        run: cargo bench --features postgres --no-run
+        working-directory: ./aw-server-rust/aw-datastore
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/aw_test
+      - name: Run actual benchmarks
+        run: |
+          echo "=== SQLite Benchmarks ===" && \
+          cargo bench --features sqlite 2>&1 | grep -E 'time:|Benchmarking' || true && \
+          echo "" && \
+          echo "=== PostgreSQL Benchmarks ===" && \
+          cargo bench --features postgres 2>&1 | grep -E 'time:|Benchmarking' || true
+        working-directory: ./aw-server-rust/aw-datastore
+        env:
+          DATABASE_URL: postgresql://test:test@localhost:5432/aw_test
