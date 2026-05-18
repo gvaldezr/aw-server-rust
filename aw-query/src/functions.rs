@@ -147,12 +147,19 @@ mod qfunctions {
         let bucket_id: String = (&args[0]).try_into()?;
         let interval = validate::get_timeinterval(env)?;
 
-        let events = match ds.get_events(
-            bucket_id.as_str(),
-            Some(*interval.start()),
-            Some(*interval.end()),
-            None,
-        ) {
+        // Execute async code in sync context using block_in_place
+        let events = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ds.get_events(
+                    bucket_id.as_str(),
+                    Some(*interval.start()),
+                    Some(*interval.end()),
+                    None,
+                ).await
+            })
+        });
+        
+        let events = match events {
             Ok(events) => events,
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
@@ -174,7 +181,15 @@ mod qfunctions {
     ) -> Result<DataType, QueryError> {
         validate::args_length(&args, 0)?;
         let mut bucketnames: Vec<DataType> = Vec::new();
-        let buckets = match ds.get_buckets() {
+        
+        // Execute async code in sync context using block_in_place
+        let buckets = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ds.get_buckets().await
+            })
+        });
+        
+        let buckets = match buckets {
             Ok(buckets) => buckets,
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(
@@ -201,7 +216,14 @@ mod qfunctions {
             _ => None,
         };
 
-        let buckets = match ds.get_buckets() {
+        // Execute async code in sync context using block_in_place
+        let buckets = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                ds.get_buckets().await
+            })
+        });
+        
+        let buckets = match buckets {
             Ok(buckets) => buckets,
             Err(e) => {
                 return Err(QueryError::BucketQueryError(format!(

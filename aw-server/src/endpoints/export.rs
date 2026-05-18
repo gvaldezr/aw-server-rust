@@ -9,17 +9,20 @@ use crate::endpoints::util::BucketsExportRocket;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
-pub fn buckets_export(state: &State<ServerState>) -> Result<BucketsExportRocket, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
+pub async fn buckets_export(state: &State<ServerState>) -> Result<BucketsExportRocket, HttpErrorJson> {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
     let mut export = BucketsExport {
         buckets: HashMap::new(),
     };
-    let mut buckets = match datastore.get_buckets() {
+    let mut buckets = match datastore.get_buckets().await {
         Ok(buckets) => buckets,
         Err(err) => return Err(err.into()),
     };
     for (bid, mut bucket) in buckets.drain() {
-        let events = match datastore.get_events(&bid, None, None, None) {
+        let events = match datastore.get_events(&bid, None, None, None).await {
             Ok(events) => events,
             Err(err) => return Err(err.into()),
         };

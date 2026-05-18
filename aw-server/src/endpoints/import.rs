@@ -39,10 +39,13 @@ fn event_identity(
     Ok((event.timestamp, duration_ns, data_json))
 }
 
-fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(datastore_mutex);
+async fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
+    let datastore = {
+        let ds = endpoints_get_lock!(datastore_mutex);
+        ds.clone()
+    };
     for (_bucketname, mut bucket) in import.buckets {
-        match datastore.create_bucket(&bucket) {
+        match datastore.create_bucket(&bucket).await {
             Ok(_) => (),
             Err(DatastoreError::BucketAlreadyExists(_)) => {
                 // Bucket already exists — merge events, skipping duplicates
@@ -68,7 +71,7 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
                         // Pathological cases (years of data) could be mitigated with pagination
                         // or a bloom filter if OOM issues arise in practice.
                         let existing = datastore
-                            .get_events_unclipped(&bucket.id, Some(start), Some(end), None)
+                            .get_events_unclipped(&bucket.id, Some(start), Some(end), None).await
                             .map_err(|e| {
                                 HttpErrorJson::new(
                                     Status::InternalServerError,
@@ -96,7 +99,7 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
                             .collect();
 
                         if !new_events.is_empty() {
-                            if let Err(e) = datastore.insert_events(&bucket.id, &new_events) {
+                            if let Err(e) = datastore.insert_events(&bucket.id, new_events).await {
                                 let err_msg = format!(
                                     "Failed to merge events into existing bucket '{}': {e:?}",
                                     bucket.id
@@ -122,11 +125,11 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
 }
 
 #[post("/", data = "<json_data>", format = "application/json")]
-pub fn bucket_import_json(
+pub async fn bucket_import_json(
     state: &State<ServerState>,
     json_data: Json<BucketsExport>,
 ) -> Result<(), HttpErrorJson> {
-    import(&state.datastore, json_data.into_inner())
+    import(&state.datastore, json_data.into_inner()).await
 }
 
 #[derive(FromForm)]
@@ -140,9 +143,9 @@ pub struct ImportForm {
 }
 
 #[post("/", data = "<form>", format = "multipart/form-data")]
-pub fn bucket_import_form(
+pub async fn bucket_import_form(
     state: &State<ServerState>,
     form: Form<ImportForm>,
 ) -> Result<(), HttpErrorJson> {
-    import(&state.datastore, form.into_inner().import.into_inner())
+    import(&state.datastore, form.into_inner().import.into_inner()).await
 }

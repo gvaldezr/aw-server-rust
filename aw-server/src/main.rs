@@ -37,10 +37,25 @@ struct Opts {
     #[clap(long)]
     port: Option<String>,
 
-    /// Path to database override
-    /// Also implies --no-legacy-import if no db found
+    /// PostgreSQL database host
     #[clap(long)]
-    dbpath: Option<String>,
+    db_host: Option<String>,
+
+    /// PostgreSQL database port
+    #[clap(long)]
+    db_port: Option<u16>,
+
+    /// PostgreSQL database user
+    #[clap(long)]
+    db_user: Option<String>,
+
+    /// PostgreSQL database password
+    #[clap(long)]
+    db_password: Option<String>,
+
+    /// PostgreSQL database name
+    #[clap(long)]
+    db_name: Option<String>,
 
     /// Path to webui override
     #[clap(long)]
@@ -55,6 +70,7 @@ struct Opts {
     device_id: Option<String>,
 
     /// Don't import from aw-server-python if no aw-server-rust db found
+    /// (Note: Legacy import not supported with PostgreSQL)
     #[clap(long)]
     no_legacy_import: bool,
 }
@@ -114,25 +130,38 @@ async fn main() -> Result<(), rocket::Error> {
         }
     }
 
-    // Set db path if overridden
-    let db_path: String = if let Some(dbpath) = opts.dbpath.clone() {
-        dbpath
-    } else {
-        dirs::db_path(testing)
-            .expect("Failed to get db path")
-            .to_str()
-            .unwrap()
-            .to_string()
-    };
-    info!("Using DB at path {:?}", db_path);
+    // Configure PostgreSQL database connection
+    let mut db_config = aw_datastore::DbConfig::from_env();
+    
+    // Override with CLI arguments if provided
+    if let Some(host) = opts.db_host {
+        db_config.host = host;
+    }
+    if let Some(port) = opts.db_port {
+        db_config.port = port;
+    }
+    if let Some(user) = opts.db_user {
+        db_config.user = user;
+    }
+    if let Some(password) = opts.db_password {
+        db_config.password = password;
+    }
+    if let Some(name) = opts.db_name {
+        db_config.database = name;
+    }
+    
+    info!(
+        "Using PostgreSQL database at {}:{}/{}",
+        db_config.host, db_config.port, db_config.database
+    );
 
     let asset_path = opts.webpath.map(|webpath| PathBuf::from(webpath));
     info!("Using aw-webui assets at path {:?}", asset_path);
 
-    // Only use legacy import if opts.dbpath is not set
-    let legacy_import = !opts.no_legacy_import && opts.dbpath.is_none();
-    if opts.dbpath.is_some() {
-        info!("Since custom dbpath is set, --no-legacy-import is implied");
+    // Note: Legacy import from aw-server-python not supported with PostgreSQL
+    let legacy_import = false;
+    if !opts.no_legacy_import {
+        warn!("Legacy import from aw-server-python is not supported with PostgreSQL backend");
     }
 
     let device_id: String = if let Some(id) = opts.device_id {
@@ -141,10 +170,14 @@ async fn main() -> Result<(), rocket::Error> {
         device_id::get_device_id()
     };
 
+    // Create datastore (async operation)
+    let datastore = aw_datastore::Datastore::new_with_config(db_config, legacy_import)
+        .await
+        .expect("Failed to initialize PostgreSQL datastore");
+
     let server_state = endpoints::ServerState {
-        // Even if legacy_import is set to true it is disabled on Android so
-        // it will not happen there
-        datastore: Mutex::new(aw_datastore::Datastore::new(db_path, legacy_import)),
+        // PostgreSQL backend - legacy import not supported
+        datastore: Mutex::new(datastore),
         asset_resolver: endpoints::AssetResolver::new(asset_path),
         device_id,
     };

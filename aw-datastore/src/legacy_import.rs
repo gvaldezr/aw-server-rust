@@ -99,7 +99,7 @@ mod import {
             Err(err) => return Err(LegacyDatastoreImportError::SQLPrepareError(err.to_string())),
         };
 
-        let rows = match stmt.query_map([&bucket_id], |row| {
+        let rows = match stmt.query_map([&bucket_id], |row| -> rusqlite::Result<(String, f64, String)> {
             let timestamp_str: String = row.get(0)?;
             let duration_float: f64 = row.get(1)?;
             let data_str: String = row.get(2)?;

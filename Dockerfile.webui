@@ -1,0 +1,40 @@
+# Multi-stage build for ActivityWatch WebUI
+FROM node:20-alpine AS builder
+
+# Install git
+RUN apk add --no-cache git
+
+# Set working directory
+WORKDIR /build
+
+# Clone aw-webui repository (master branch)
+ARG WEBUI_VERSION=master
+RUN git clone --depth 1 --branch ${WEBUI_VERSION} https://github.com/ActivityWatch/aw-webui.git .
+
+# Set Node options to enable crypto in webpack
+ENV NODE_OPTIONS="--openssl-legacy-provider"
+
+# Install dependencies
+RUN npm ci
+
+# Build for production
+RUN npm run build
+
+# Production stage - nginx
+FROM nginx:1.25-alpine
+
+# Copy built files from builder
+COPY --from=builder /build/dist /usr/share/nginx/html
+
+# Copy custom nginx configuration
+COPY docker/nginx.conf /etc/nginx/nginx.conf
+
+# Add healthcheck
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD wget --no-verbose --tries=1 --spider http://localhost/health || exit 1
+
+# Expose port 80 (will be mapped to 8080 in docker-compose)
+EXPOSE 80
+
+# Start nginx
+CMD ["nginx", "-g", "daemon off;"]

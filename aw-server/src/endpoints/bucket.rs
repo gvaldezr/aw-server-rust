@@ -18,23 +18,29 @@ use crate::endpoints::util::BucketsExportRocket;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
 #[get("/")]
-pub fn buckets_get(
+pub async fn buckets_get(
     state: &State<ServerState>,
 ) -> Result<Json<HashMap<String, Bucket>>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.get_buckets() {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    match datastore.get_buckets().await {
         Ok(bucketlist) => Ok(Json(bucketlist)),
         Err(err) => Err(err.into()),
     }
 }
 
 #[get("/<bucket_id>")]
-pub fn bucket_get(
+pub async fn bucket_get(
     bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<Json<Bucket>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.get_bucket(&bucket_id) {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    match datastore.get_bucket(&bucket_id).await {
         Ok(bucket) => Ok(Json(bucket)),
         Err(e) => Err(e.into()),
     }
@@ -45,7 +51,7 @@ pub fn bucket_get(
 /// If hostname is "!local", the hostname and device_id will be set from the server info.
 /// This is useful for watchers which are known/assumed to run locally but might not know their hostname (like aw-watcher-web).
 #[post("/<bucket_id>", data = "<message>", format = "application/json")]
-pub fn bucket_new(
+pub async fn bucket_new(
     bucket_id: &str,
     message: Json<Bucket>,
     state: &State<ServerState>,
@@ -62,16 +68,22 @@ pub fn bucket_new(
             .data
             .insert("device_id".to_string(), state.device_id.clone().into());
     }
-    let datastore = endpoints_get_lock!(state.datastore);
-    let ret = datastore.create_bucket(&bucket);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let ret = datastore.create_bucket(&bucket).await;
     match ret {
         Ok(_) => Ok(()),
-        Err(err) => Err(err.into()),
+        Err(err) => {
+            error!("Failed to create bucket {}: {:?}", bucket_id, err);
+            Err(err.into())
+        }
     }
 }
 
 #[get("/<bucket_id>/events?<start>&<end>&<limit>")]
-pub fn bucket_events_get(
+pub async fn bucket_events_get(
     bucket_id: &str,
     start: Option<String>,
     end: Option<String>,
@@ -103,8 +115,11 @@ pub fn bucket_events_get(
         },
         None => None,
     };
-    let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.get_events(bucket_id, starttime, endtime, limit);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let res = datastore.get_events(bucket_id, starttime, endtime, limit).await;
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
@@ -114,14 +129,17 @@ pub fn bucket_events_get(
 // Needs unused parameter, otherwise there'll be a route collision
 // See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
 #[get("/<bucket_id>/events/<event_id>?<_unused..>")]
-pub fn bucket_events_get_single(
+pub async fn bucket_events_get_single(
     bucket_id: &str,
     event_id: i64,
     _unused: Option<u64>,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.get_event(bucket_id, event_id);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let res = datastore.get_event(bucket_id, event_id).await;
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
@@ -129,13 +147,16 @@ pub fn bucket_events_get_single(
 }
 
 #[post("/<bucket_id>/events", data = "<events>", format = "application/json")]
-pub fn bucket_events_create(
+pub async fn bucket_events_create(
     bucket_id: &str,
     events: Json<Vec<Event>>,
     state: &State<ServerState>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.insert_events(bucket_id, &events);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let res = datastore.insert_events(bucket_id, events.into_inner()).await;
     match res {
         Ok(events) => Ok(Json(events)),
         Err(err) => Err(err.into()),
@@ -147,27 +168,33 @@ pub fn bucket_events_create(
     data = "<heartbeat_json>",
     format = "application/json"
 )]
-pub fn bucket_events_heartbeat(
+pub async fn bucket_events_heartbeat(
     bucket_id: &str,
     heartbeat_json: Json<Event>,
     pulsetime: f64,
     state: &State<ServerState>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    match datastore.heartbeat(bucket_id, heartbeat, pulsetime).await {
         Ok(e) => Ok(Json(e)),
         Err(err) => Err(err.into()),
     }
 }
 
 #[get("/<bucket_id>/events/count")]
-pub fn bucket_event_count(
+pub async fn bucket_event_count(
     bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<Json<u64>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.get_event_count(bucket_id, None, None);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let res = datastore.get_event_count(bucket_id, None, None).await;
     match res {
         Ok(eventcount) => Ok(Json(eventcount as u64)),
         Err(err) => Err(err.into()),
@@ -175,34 +202,40 @@ pub fn bucket_event_count(
 }
 
 #[delete("/<bucket_id>/events/<event_id>")]
-pub fn bucket_events_delete_by_id(
+pub async fn bucket_events_delete_by_id(
     bucket_id: &str,
     event_id: i64,
     state: &State<ServerState>,
 ) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    match datastore.delete_events_by_id(bucket_id, vec![event_id]).await {
         Ok(_) => Ok(()),
         Err(err) => Err(err.into()),
     }
 }
 
 #[get("/<bucket_id>/export")]
-pub fn bucket_export(
+pub async fn bucket_export(
     bucket_id: &str,
     state: &State<ServerState>,
 ) -> Result<BucketsExportRocket, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
     let mut export = BucketsExport {
         buckets: HashMap::new(),
     };
-    let mut bucket = match datastore.get_bucket(bucket_id) {
+    let mut bucket = match datastore.get_bucket(bucket_id).await {
         Ok(bucket) => bucket,
         Err(err) => return Err(err.into()),
     };
     /* TODO: Replace expect with http error */
     let events = datastore
-        .get_events(bucket_id, None, None, None)
+        .get_events(bucket_id, None, None, None).await
         .expect("Failed to get events for bucket");
     bucket.events = Some(TryVec::new(events));
     export.buckets.insert(bucket_id.into(), bucket);
@@ -211,9 +244,12 @@ pub fn bucket_export(
 }
 
 #[delete("/<bucket_id>")]
-pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.delete_bucket(bucket_id) {
+pub async fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    match datastore.delete_bucket(bucket_id).await {
         Ok(_) => Ok(()),
         Err(err) => Err(err.into()),
     }

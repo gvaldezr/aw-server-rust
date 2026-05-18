@@ -1,633 +1,514 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::thread;
+use std::sync::Arc;
 
 use chrono::DateTime;
-use chrono::Duration;
 use chrono::Utc;
 
-use rusqlite::Connection;
-use rusqlite::DropBehavior;
-use rusqlite::Transaction;
-use rusqlite::TransactionBehavior;
+use deadpool_postgres::{Manager, Pool};
+use tokio_postgres::{Config as PgConfig, NoTls};
 
 use aw_models::Bucket;
 use aw_models::Event;
 
 use crate::privacy_filter::PrivacyFilterEngine;
+use crate::retry::RetryPolicy;
+use crate::metrics::DbMetrics;
+use crate::migrations::MigrationManager;
 use crate::DatastoreError;
 use crate::DatastoreInstance;
-use crate::DatastoreMethod;
 
-use mpsc_requests::ResponseReceiver;
+/// Database configuration for PostgreSQL
+#[derive(Clone, Debug)]
+pub struct DbConfig {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    pub database: String,
+}
 
-type RequestSender = mpsc_requests::RequestSender<Command, Result<Response, DatastoreError>>;
-type RequestReceiver = mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>;
+impl DbConfig {
+    /// Load database configuration from environment variables
+    pub fn from_env() -> Self {
+        DbConfig {
+            host: std::env::var("DB_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            port: std::env::var("DB_PORT")
+                .ok()
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(5432),
+            user: std::env::var("DB_USER").unwrap_or_else(|_| "aw_user".to_string()),
+            password: Self::load_password(),
+            database: std::env::var("DB_NAME").unwrap_or_else(|_| "activitywatch".to_string()),
+        }
+    }
+
+    /// Load password from file (Docker secrets support) or environment variable
+    fn load_password() -> String {
+        // Try loading from file first (Docker secrets pattern)
+        if let Ok(password_file) = std::env::var("DB_PASSWORD_FILE") {
+            if let Ok(password) = std::fs::read_to_string(&password_file) {
+                return password.trim().to_string();
+            }
+            eprintln!("Warning: DB_PASSWORD_FILE specified but could not read: {}", password_file);
+        }
+
+        // Fall back to environment variable
+        std::env::var("DB_PASSWORD").unwrap_or_else(|_| {
+            eprintln!("Warning: No DB_PASSWORD or DB_PASSWORD_FILE specified, using default");
+            "activitywatch".to_string()
+        })
+    }
+
+    /// Get PostgreSQL connection string
+    pub fn connection_string(&self) -> String {
+        format!(
+            "host={} port={} user={} password={} dbname={}",
+            self.host, self.port, self.user, self.password, self.database
+        )
+    }
+
+    pub fn to_postgres_config(&self) -> PgConfig {
+        let mut config = PgConfig::new();
+        config.host(&self.host);
+        config.port(self.port);
+        config.user(&self.user);
+        config.password(&self.password);
+        config.dbname(&self.database);
+        
+        // Set connection timeouts
+        config.connect_timeout(std::time::Duration::from_secs(10));
+        config.keepalives(true);
+        config.keepalives_idle(std::time::Duration::from_secs(30));
+        
+        config
+    }
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
 
 #[derive(Clone)]
 pub struct Datastore {
-    requester: RequestSender,
+    pool: Arc<Pool>,
+    retry_policy: Arc<RetryPolicy>,
+    metrics: Arc<DbMetrics>,
+    privacy_engine: Arc<tokio::sync::RwLock<PrivacyFilterEngine>>,
 }
 
 impl fmt::Debug for Datastore {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Datastore()")
-    }
-}
-
-/*
- * TODO:
- * - Allow read requests to go straight through a read-only db connection instead of requesting the
- * worker thread for better performance?
- * TODO: Add an separate "Import" request which does an import with an transaction
- */
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub enum Response {
-    Empty(),
-    Bucket(Bucket),
-    BucketMap(HashMap<String, Bucket>),
-    Event(Event),
-    EventList(Vec<Event>),
-    Count(i64),
-    KeyValue(String),
-    KeyValues(HashMap<String, String>),
-}
-
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone)]
-pub enum Command {
-    CreateBucket(Bucket),
-    DeleteBucket(String),
-    GetBucket(String),
-    GetBuckets(),
-    InsertEvents(String, Vec<Event>),
-    Heartbeat(String, Event, f64),
-    GetEvent(String, i64),
-    GetEvents(
-        String,
-        Option<DateTime<Utc>>,
-        Option<DateTime<Utc>>,
-        Option<u64>,
-        bool,
-    ),
-    GetEventCount(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>),
-    DeleteEventsById(String, Vec<i64>),
-    ForceCommit(),
-    GetKeyValues(String),
-    GetKeyValue(String),
-    SetKeyValue(String, String),
-    DeleteKeyValue(String),
-    RefreshPrivacyFilter(),
-    Close(),
-}
-
-fn _unwrap_response(
-    receiver: ResponseReceiver<Result<Response, DatastoreError>>,
-) -> Result<(), DatastoreError> {
-    match receiver.collect().unwrap() {
-        Ok(r) => match r {
-            Response::Empty() => Ok(()),
-            _ => panic!("Invalid response"),
-        },
-        Err(e) => Err(e),
-    }
-}
-
-struct DatastoreWorker {
-    responder: RequestReceiver,
-    legacy_import: bool,
-    quit: bool,
-    uncommitted_events: usize,
-    commit: bool,
-    last_heartbeat: HashMap<String, Option<Event>>,
-    privacy_engine: PrivacyFilterEngine,
-}
-
-impl DatastoreWorker {
-    pub fn new(
-        responder: mpsc_requests::RequestReceiver<Command, Result<Response, DatastoreError>>,
-        legacy_import: bool,
-    ) -> Self {
-        DatastoreWorker {
-            responder,
-            legacy_import,
-            quit: false,
-            uncommitted_events: 0,
-            commit: false,
-            last_heartbeat: HashMap::new(),
-            privacy_engine: PrivacyFilterEngine::new(vec![]),
-        }
-    }
-
-    fn work_loop(&mut self, method: DatastoreMethod) {
-        // Open SQLite connection
-        let mut conn = match &method {
-            DatastoreMethod::Memory() => {
-                Connection::open_in_memory().expect("Failed to create in-memory datastore")
-            }
-            DatastoreMethod::File(path) => {
-                Connection::open(path).expect("Failed to create datastore")
-            }
-        };
-        let mut ds = DatastoreInstance::new(&conn, true).unwrap();
-
-        // Ensure legacy import
-        if self.legacy_import {
-            let transaction = match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                Ok(transaction) => transaction,
-                Err(err) => {
-                    panic!("Unable to start immediate transaction on SQLite database! {err}")
-                }
-            };
-            match ds.ensure_legacy_import(&transaction) {
-                Ok(_) => (),
-                Err(err) => error!("Failed to do legacy import: {:?}", err),
-            }
-            match transaction.commit() {
-                Ok(_) => (),
-                Err(err) => {
-                    error!("Failed to commit legacy import transaction: {err}");
-                    // Continue without panicking — legacy import will be retried on
-                    // next startup if the commit didn't persist.
-                }
-            }
-        }
-
-        // Start handling and respond to requests
-        loop {
-            let last_commit_time: DateTime<Utc> = Utc::now();
-            let mut tx: Transaction =
-                match conn.transaction_with_behavior(TransactionBehavior::Immediate) {
-                    Ok(tx) => tx,
-                    Err(err) => {
-                        error!("Unable to start transaction! {:?}", err);
-                        // Wait 1s before retrying
-                        std::thread::sleep(std::time::Duration::from_millis(1000));
-                        continue;
-                    }
-                };
-            tx.set_drop_behavior(DropBehavior::Commit);
-
-            self.uncommitted_events = 0;
-            self.commit = false;
-            loop {
-                let (request, response_sender) = match self.responder.poll() {
-                    Ok((req, res_sender)) => (req, res_sender),
-                    Err(err) => {
-                        // All references to responder is gone, quit
-                        error!("DB worker quitting, error: {err:?}");
-                        self.quit = true;
-                        break;
-                    }
-                };
-                let response = self.handle_request(request, &mut ds, &tx);
-                response_sender.respond(response);
-
-                let now: DateTime<Utc> = Utc::now();
-                let commit_interval_passed: bool = (now - last_commit_time) > Duration::seconds(15);
-                if self.commit
-                    || commit_interval_passed
-                    || self.uncommitted_events > 100
-                    || self.quit
-                {
-                    break;
-                };
-            }
-            debug!(
-                "Committing DB! Force commit {}, {} uncommitted events",
-                self.commit, self.uncommitted_events
-            );
-            match tx.commit() {
-                Ok(_) => (),
-                Err(err) => {
-                    error!(
-                        "Failed to commit datastore transaction ({} events lost): {err}",
-                        self.uncommitted_events
-                    );
-                    // Continue instead of panicking — the worker thread survives this
-                    // transient failure (e.g. SQLITE_FULL on disk full). Note: clients
-                    // already received success responses before the commit, so they won't
-                    // know to retry. Rolled-back events create a gap in the timeline;
-                    // watchers will resume sending heartbeats from current state, but the
-                    // specific batch of events is permanently lost.
-                }
-            }
-            if self.quit {
-                break;
-            };
-        }
-        info!("DB Worker thread finished");
-    }
-
-    fn handle_request(
-        &mut self,
-        request: Command,
-        ds: &mut DatastoreInstance,
-        tx: &Transaction,
-    ) -> Result<Response, DatastoreError> {
-        match request {
-            Command::CreateBucket(bucket) => match ds.create_bucket(tx, bucket) {
-                Ok(_) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
-                }
-                Err(e) => Err(e),
-            },
-            Command::DeleteBucket(bucketname) => match ds.delete_bucket(tx, &bucketname) {
-                Ok(_) => {
-                    self.commit = true;
-                    Ok(Response::Empty())
-                }
-                Err(e) => Err(e),
-            },
-            Command::GetBucket(bucketname) => match ds.get_bucket(&bucketname) {
-                Ok(b) => Ok(Response::Bucket(b)),
-                Err(e) => Err(e),
-            },
-            Command::GetBuckets() => Ok(Response::BucketMap(ds.get_buckets())),
-            Command::InsertEvents(bucketname, events) => {
-                let filtered = self.privacy_engine.filter_events(&bucketname, events);
-                if filtered.is_empty() {
-                    return Ok(Response::EventList(vec![]));
-                }
-                match ds.insert_events(tx, &bucketname, filtered) {
-                    Ok(events) => {
-                        self.uncommitted_events += events.len();
-                        self.last_heartbeat.insert(bucketname.to_string(), None); // invalidate last_heartbeat cache
-                        Ok(Response::EventList(events))
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            Command::Heartbeat(bucketname, event, pulsetime) => {
-                // Apply privacy filter to heartbeat
-                let filtered = match self.privacy_engine.filter_event(&bucketname, event.clone()) {
-                    Some(event) => event,
-                    None => {
-                        // Heartbeat dropped by filter — return last cached event so the
-                        // watcher's heartbeat-merge state machine continues correctly.
-                        // Fall back to the incoming event itself if no prior event is cached
-                        // (avoids returning a zero-timestamp default Event).
-                        let last = self
-                            .last_heartbeat
-                            .get(&bucketname)
-                            .and_then(|e| e.clone())
-                            .unwrap_or(event);
-                        return Ok(Response::Event(last));
-                    }
-                };
-                match ds.heartbeat(
-                    tx,
-                    &bucketname,
-                    filtered,
-                    pulsetime,
-                    &mut self.last_heartbeat,
-                ) {
-                    Ok(e) => {
-                        self.uncommitted_events += 1;
-                        Ok(Response::Event(e))
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            Command::GetEvent(bucketname, event_id) => {
-                match ds.get_event(tx, &bucketname, event_id) {
-                    Ok(el) => Ok(Response::Event(el)),
-                    Err(e) => Err(e),
-                }
-            }
-            Command::GetEvents(bucketname, starttime_opt, endtime_opt, limit_opt, unclipped) => {
-                let result = if unclipped {
-                    ds.get_events_unclipped(tx, &bucketname, starttime_opt, endtime_opt, limit_opt)
-                } else {
-                    ds.get_events(tx, &bucketname, starttime_opt, endtime_opt, limit_opt)
-                };
-                match result {
-                    Ok(el) => Ok(Response::EventList(el)),
-                    Err(e) => Err(e),
-                }
-            }
-            Command::GetEventCount(bucketname, starttime_opt, endtime_opt) => {
-                match ds.get_event_count(tx, &bucketname, starttime_opt, endtime_opt) {
-                    Ok(n) => Ok(Response::Count(n)),
-                    Err(e) => Err(e),
-                }
-            }
-            Command::DeleteEventsById(bucketname, event_ids) => {
-                match ds.delete_events_by_id(tx, &bucketname, event_ids) {
-                    Ok(()) => Ok(Response::Empty()),
-                    Err(e) => Err(e),
-                }
-            }
-            Command::ForceCommit() => {
-                self.commit = true;
-                Ok(Response::Empty())
-            }
-            Command::GetKeyValues(pattern) => match ds.get_key_values(tx, pattern.as_str()) {
-                Ok(result) => Ok(Response::KeyValues(result)),
-                Err(e) => Err(e),
-            },
-            Command::SetKeyValue(key, data) => match ds.insert_key_value(tx, &key, &data) {
-                Ok(()) => Ok(Response::Empty()),
-                Err(e) => Err(e),
-            },
-            Command::GetKeyValue(key) => match ds.get_key_value(tx, &key) {
-                Ok(result) => Ok(Response::KeyValue(result)),
-                Err(e) => Err(e),
-            },
-            Command::DeleteKeyValue(key) => match ds.delete_key_value(tx, &key) {
-                Ok(()) => Ok(Response::Empty()),
-                Err(e) => Err(e),
-            },
-            Command::RefreshPrivacyFilter() => {
-                // Reload privacy filter rules from settings
-                match ds.get_key_value(tx, "settings.privacy_filters") {
-                    Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
-                        Ok(engine) => self.privacy_engine = engine,
-                        Err(e) => warn!("Failed to parse privacy_filters setting: {e}"),
-                    },
-                    Err(_) => {
-                        // Settings key absent — clear rules so removing the key disables filtering
-                        self.privacy_engine = PrivacyFilterEngine::new(vec![]);
-                    }
-                }
-                Ok(Response::Empty())
-            }
-            Command::Close() => {
-                self.quit = true;
-                Ok(Response::Empty())
-            }
-        }
+        write!(f, "Datastore(PostgreSQL)")
     }
 }
 
 impl Datastore {
-    pub fn new(dbpath: String, legacy_import: bool) -> Self {
-        let method = DatastoreMethod::File(dbpath);
-        Datastore::_new_internal(method, legacy_import)
+    /// Create a new Datastore with PostgreSQL configuration
+    pub async fn new_with_config(
+        db_config: DbConfig,
+        legacy_import: bool,
+    ) -> Result<Self, DatastoreError> {
+        if legacy_import {
+            warn!("Legacy import from aw-server-python is not supported with PostgreSQL backend");
+        }
+
+        // Log database configuration (without password)
+        info!(
+            "Connecting to PostgreSQL at {}:{}/{} as user {}",
+            db_config.host, db_config.port, db_config.database, db_config.user
+        );
+
+        // Initial delay to allow network to stabilize (Docker)
+        info!("Waiting 3 seconds for network initialization...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+        let pg_config = db_config.to_postgres_config();
+        let manager = Manager::new(pg_config, NoTls);
+        
+        let pool = Pool::builder(manager)
+            .max_size(20)
+            .build()
+            .map_err(|e| {
+                DatastoreError::InternalError(format!("Failed to create connection pool: {}", e))
+            })?;
+
+        // Test connection with retries (for Docker network initialization)
+        info!("Testing database connection...");
+        let max_retries = 5;
+        let mut last_error = String::new();
+        
+        for attempt in 1..=max_retries {
+            match pool.get().await {
+                Ok(_client) => {
+                    info!("Database connection successful on attempt {}", attempt);
+                    break;
+                }
+                Err(e) => {
+                    last_error = format!("{:?}", e);  // Use Debug format for more details
+                    if attempt < max_retries {
+                        warn!("Connection attempt {} failed: {}. Retrying in 2s...", attempt, last_error);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    } else {
+                        error!("Failed to connect to database after {} attempts: {}", max_retries, last_error);
+                        return Err(DatastoreError::InternalError(format!("Failed to connect to database: {}", last_error)));
+                    }
+                }
+            }
+        }
+
+        let migration_manager = MigrationManager::new(Arc::new(pool.clone()));
+        migration_manager
+            .run_migrations()
+            .await
+            .map_err(|e| DatastoreError::InternalError(format!("Migration failed: {}", e)))?;
+
+        info!(
+            "PostgreSQL connection pool initialized: {}:{}/{}",
+            db_config.host, db_config.port, db_config.database
+        );
+
+        Ok(Datastore {
+            pool: Arc::new(pool),
+            retry_policy: Arc::new(RetryPolicy::default()),
+            metrics: Arc::new(DbMetrics::new()),
+            privacy_engine: Arc::new(tokio::sync::RwLock::new(PrivacyFilterEngine::new(vec![]))),
+        })
     }
 
-    pub fn new_in_memory(legacy_import: bool) -> Self {
-        let method = DatastoreMethod::Memory();
-        Datastore::_new_internal(method, legacy_import)
-    }
-
-    fn _new_internal(method: DatastoreMethod, legacy_import: bool) -> Self {
-        let (requester, responder) =
-            mpsc_requests::channel::<Command, Result<Response, DatastoreError>>();
-        let _thread = thread::spawn(move || {
-            let mut di = DatastoreWorker::new(responder, legacy_import);
-            di.work_loop(method);
-        });
-        Datastore { requester }
-    }
-
-    pub fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
-        let cmd = Command::CreateBucket(bucket.clone());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
+    async fn get_connection(&self) -> Result<deadpool_postgres::Client, DatastoreError> {
+        let pool = Arc::clone(&self.pool);
+        let metrics = Arc::clone(&self.metrics);
+        
+        let start = std::time::Instant::now();
+        match pool.get().await {
+            Ok(client) => {
+                metrics.record_query("pool_get", start.elapsed());
+                Ok(client)
+            }
+            Err(e) => {
+                metrics.record_error("pool_get");
+                Err(DatastoreError::InternalError(format!(
+                    "Failed to get connection from pool: {}",
+                    e
+                )))
+            }
         }
     }
 
-    pub fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError> {
-        let cmd = Command::DeleteBucket(bucket_id.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => Ok(()),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+    pub async fn create_bucket(&self, bucket: &Bucket) -> Result<(), DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::create_bucket_pg(&client, bucket).await;
+        
+        self.metrics.record_query("create_bucket", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("create_bucket");
         }
+        
+        result
     }
 
-    pub fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
-        let cmd = Command::GetBucket(bucket_id.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Bucket(b) => Ok(b),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+    pub async fn delete_bucket(&self, bucket_id: &str) -> Result<(), DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::delete_bucket_pg(&client, bucket_id).await;
+        
+        self.metrics.record_query("delete_bucket", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("delete_bucket");
         }
+        
+        result
     }
 
-    pub fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
-        let cmd = Command::GetBuckets();
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::BucketMap(bm) => Ok(bm),
-                e => Err(DatastoreError::InternalError(format!(
-                    "Invalid response: {e:?}"
-                ))),
-            },
-            Err(e) => Err(e),
+    pub async fn get_bucket(&self, bucket_id: &str) -> Result<Bucket, DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_bucket_pg(&client, bucket_id).await;
+        
+        self.metrics.record_query("get_bucket", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_bucket");
         }
+        
+        result
     }
 
-    pub fn insert_events(
+    pub async fn get_buckets(&self) -> Result<HashMap<String, Bucket>, DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_buckets_pg(&client).await;
+        
+        self.metrics.record_query("get_buckets", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_buckets");
+        }
+        
+        result
+    }
+
+    pub async fn insert_events(
         &self,
         bucket_id: &str,
-        events: &[Event],
+        events: Vec<Event>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        let cmd = Command::InsertEvents(bucket_id.to_string(), events.to_vec());
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::EventList(events) => Ok(events),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        let privacy_engine = self.privacy_engine.read().await;
+        let filtered = privacy_engine.filter_events(bucket_id, events);
+        drop(privacy_engine);
+        
+        if filtered.is_empty() {
+            return Ok(vec![]);
         }
+
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::insert_events_pg(&client, bucket_id, filtered).await;
+        
+        self.metrics.record_query("insert_events", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("insert_events");
+        }
+        
+        result
     }
 
-    pub fn heartbeat(
+    pub async fn heartbeat(
         &self,
         bucket_id: &str,
-        heartbeat: Event,
+        event: Event,
         pulsetime: f64,
     ) -> Result<Event, DatastoreError> {
-        let cmd = Command::Heartbeat(bucket_id.to_string(), heartbeat, pulsetime);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Event(e) => Ok(e),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        let privacy_engine = self.privacy_engine.read().await;
+        let filtered = match privacy_engine.filter_event(bucket_id, event.clone()) {
+            Some(e) => e,
+            None => {
+                drop(privacy_engine);
+                return Ok(event);
+            }
+        };
+        drop(privacy_engine);
+
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::heartbeat_pg(&client, bucket_id, filtered, pulsetime).await;
+        
+        self.metrics.record_query("heartbeat", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("heartbeat");
         }
+        
+        result
     }
 
-    pub fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, DatastoreError> {
-        let cmd = Command::GetEvent(bucket_id.to_string(), event_id);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Event(el) => Ok(el),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+    pub async fn get_event(&self, bucket_id: &str, event_id: i64) -> Result<Event, DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_event_pg(&client, bucket_id, event_id).await;
+        
+        self.metrics.record_query("get_event", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_event");
         }
+        
+        result
     }
 
-    pub fn get_events(
+    pub async fn get_events(
         &self,
         bucket_id: &str,
-        starttime_opt: Option<DateTime<Utc>>,
-        endtime_opt: Option<DateTime<Utc>>,
-        limit_opt: Option<u64>,
+        starttime: Option<DateTime<Utc>>,
+        endtime: Option<DateTime<Utc>>,
+        limit: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        let cmd = Command::GetEvents(
-            bucket_id.to_string(),
-            starttime_opt,
-            endtime_opt,
-            limit_opt,
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_events_pg(
+            &client,
+            bucket_id,
+            starttime,
+            endtime,
+            limit,
             false,
-        );
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::EventList(el) => Ok(el),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        )
+        .await;
+        
+        self.metrics.record_query("get_events", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_events");
         }
+        
+        result
     }
 
-    pub fn get_events_unclipped(
+    pub async fn get_events_unclipped(
         &self,
         bucket_id: &str,
-        starttime_opt: Option<DateTime<Utc>>,
-        endtime_opt: Option<DateTime<Utc>>,
-        limit_opt: Option<u64>,
+        starttime: Option<DateTime<Utc>>,
+        endtime: Option<DateTime<Utc>>,
+        limit: Option<u64>,
     ) -> Result<Vec<Event>, DatastoreError> {
-        let cmd = Command::GetEvents(
-            bucket_id.to_string(),
-            starttime_opt,
-            endtime_opt,
-            limit_opt,
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_events_pg(
+            &client,
+            bucket_id,
+            starttime,
+            endtime,
+            limit,
             true,
-        );
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::EventList(el) => Ok(el),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        )
+        .await;
+        
+        self.metrics.record_query("get_events_unclipped", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_events_unclipped");
         }
+        
+        result
     }
 
-    pub fn get_event_count(
+    pub async fn get_event_count(
         &self,
         bucket_id: &str,
-        starttime_opt: Option<DateTime<Utc>>,
-        endtime_opt: Option<DateTime<Utc>>,
+        starttime: Option<DateTime<Utc>>,
+        endtime: Option<DateTime<Utc>>,
     ) -> Result<i64, DatastoreError> {
-        let cmd = Command::GetEventCount(bucket_id.to_string(), starttime_opt, endtime_opt);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Count(n) => Ok(n),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_event_count_pg(&client, bucket_id, starttime, endtime).await;
+        
+        self.metrics.record_query("get_event_count", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_event_count");
         }
+        
+        result
     }
 
-    pub fn delete_events_by_id(
+    pub async fn delete_events_by_id(
         &self,
         bucket_id: &str,
         event_ids: Vec<i64>,
     ) -> Result<(), DatastoreError> {
-        let cmd = Command::DeleteEventsById(bucket_id.to_string(), event_ids);
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => Ok(()),
-                _ => panic!("Invalid response"),
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::delete_events_by_id_pg(&client, bucket_id, event_ids).await;
+        
+        self.metrics.record_query("delete_events_by_id", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("delete_events_by_id");
+        }
+        
+        result
+    }
+
+    pub async fn force_commit(&self) -> Result<(), DatastoreError> {
+        Ok(())
+    }
+
+    pub async fn get_key_values(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_key_values_pg(&client, pattern).await;
+        
+        self.metrics.record_query("get_key_values", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_key_values");
+        }
+        
+        result
+    }
+
+    pub async fn get_key_value(&self, key: &str) -> Result<String, DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::get_key_value_pg(&client, key).await;
+        
+        self.metrics.record_query("get_key_value", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("get_key_value");
+        }
+        
+        result
+    }
+
+    pub async fn set_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::set_key_value_pg(&client, key, data).await;
+        
+        self.metrics.record_query("set_key_value", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("set_key_value");
+        }
+        
+        result
+    }
+
+    pub async fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError> {
+        let client = self.get_connection().await?;
+        let start = std::time::Instant::now();
+        
+        let result = DatastoreInstance::delete_key_value_pg(&client, key).await;
+        
+        self.metrics.record_query("delete_key_value", start.elapsed());
+        if result.is_err() {
+            self.metrics.record_error("delete_key_value");
+        }
+        
+        result
+    }
+
+    pub async fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
+        let client = self.get_connection().await?;
+        
+        match DatastoreInstance::get_key_value_pg(&client, "settings.privacy_filters").await {
+            Ok(json_str) => match PrivacyFilterEngine::from_json(&json_str) {
+                Ok(engine) => {
+                    let mut privacy_engine = self.privacy_engine.write().await;
+                    *privacy_engine = engine;
+                    Ok(())
+                }
+                Err(e) => {
+                    warn!("Failed to parse privacy_filters setting: {}", e);
+                    Ok(())
+                }
             },
-            Err(e) => Err(e),
+            Err(_) => {
+                let mut privacy_engine = self.privacy_engine.write().await;
+                *privacy_engine = PrivacyFilterEngine::new(vec![]);
+                Ok(())
+            }
         }
     }
 
-    pub fn force_commit(&self) -> Result<(), DatastoreError> {
-        let cmd = Command::ForceCommit();
-        let receiver = self.requester.request(cmd).unwrap();
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => Ok(()),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
+    pub async fn close(&self) {
+        info!("Closing PostgreSQL datastore");
     }
 
-    pub fn get_key_values(&self, pattern: &str) -> Result<HashMap<String, String>, DatastoreError> {
-        let cmd = Command::GetKeyValues(pattern.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::KeyValues(value) => Ok(value),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
+    pub fn get_metrics(&self) -> Arc<DbMetrics> {
+        Arc::clone(&self.metrics)
     }
 
-    pub fn get_key_value(&self, key: &str) -> Result<String, DatastoreError> {
-        let cmd = Command::GetKeyValue(key.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::KeyValue(kv) => Ok(kv),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => Err(e),
-        }
-    }
-
-    pub fn set_key_value(&self, key: &str, data: &str) -> Result<(), DatastoreError> {
-        let cmd = Command::SetKeyValue(key.to_string(), data.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        _unwrap_response(receiver)
-    }
-
-    pub fn delete_key_value(&self, key: &str) -> Result<(), DatastoreError> {
-        let cmd = Command::DeleteKeyValue(key.to_string());
-        let receiver = self.requester.request(cmd).unwrap();
-
-        _unwrap_response(receiver)
-    }
-
-    pub fn refresh_privacy_filter(&self) -> Result<(), DatastoreError> {
-        let receiver = self
-            .requester
-            .request(Command::RefreshPrivacyFilter())
-            .unwrap();
-        _unwrap_response(receiver)
-    }
-
-    // Should block until worker has stopped
-    pub fn close(&self) {
-        info!("Sending close request to database");
-        let receiver = self.requester.request(Command::Close()).unwrap();
-
-        match receiver.collect().unwrap() {
-            Ok(r) => match r {
-                Response::Empty() => (),
-                _ => panic!("Invalid response"),
-            },
-            Err(e) => panic!("Error closing database: {:?}", e),
-        }
+    pub fn get_pool_status(&self) -> (usize, usize) {
+        let status = self.pool.status();
+        (status.size, status.available.max(0) as usize)
     }
 }

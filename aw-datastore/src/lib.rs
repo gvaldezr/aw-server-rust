@@ -16,12 +16,23 @@ macro_rules! json_map {
 }
 
 mod datastore;
+mod datastore_pg;  // PostgreSQL implementations
 mod legacy_import;
 mod privacy_filter;
 mod worker;
 
+// PostgreSQL-specific modules
+pub mod retry;
+pub mod metrics;
+pub mod health;
+pub mod migrations;
+
 pub use self::datastore::DatastoreInstance;
-pub use self::worker::Datastore;
+pub use self::worker::{Datastore, DbConfig};
+pub use self::retry::RetryPolicy;
+pub use self::metrics::DbMetrics;
+pub use self::health::{HealthChecker, HealthStatus};
+pub use self::migrations::MigrationManager;
 
 #[derive(Debug, Clone)]
 pub enum DatastoreMethod {

@@ -3,9 +3,8 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 use std::collections::HashMap;
-use std::sync::MutexGuard;
 
-use aw_datastore::{Datastore, DatastoreError};
+use aw_datastore::DatastoreError;
 
 use crate::endpoints::HttpErrorJson;
 
@@ -22,11 +21,14 @@ fn parse_key(key: String) -> Result<String, HttpErrorJson> {
 }
 
 #[get("/")]
-pub fn settings_get(
+pub async fn settings_get(
     state: &State<ServerState>,
 ) -> Result<Json<HashMap<String, serde_json::Value>>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    let queryresults = match datastore.get_key_values("settings.%") {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let queryresults = match datastore.get_key_values("settings.%").await {
         Ok(result) => Ok(result),
         Err(err) => Err(err.into()),
     };
@@ -48,14 +50,17 @@ pub fn settings_get(
 }
 
 #[get("/<key>")]
-pub fn setting_get(
+pub async fn setting_get(
     state: &State<ServerState>,
     key: String,
 ) -> Result<Json<serde_json::Value>, HttpErrorJson> {
     let setting_key = parse_key(key)?;
-    let datastore = endpoints_get_lock!(state.datastore);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
 
-    match datastore.get_key_value(&setting_key) {
+    match datastore.get_key_value(&setting_key).await {
         Ok(value) => Ok(Json(serde_json::from_str(&value).unwrap())),
         Err(DatastoreError::NoSuchKey(_)) => Ok(Json(serde_json::from_str("null").unwrap())),
         Err(err) => Err(err.into()),
@@ -63,7 +68,7 @@ pub fn setting_get(
 }
 
 #[post("/<key>", data = "<value>", format = "application/json")]
-pub fn setting_set(
+pub async fn setting_set(
     state: &State<ServerState>,
     key: String,
     value: Json<serde_json::Value>,
@@ -79,8 +84,11 @@ pub fn setting_set(
         }
     };
 
-    let datastore: MutexGuard<'_, Datastore> = endpoints_get_lock!(state.datastore);
-    let result = datastore.set_key_value(&setting_key, &value_str);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let result = datastore.set_key_value(&setting_key, &value_str).await;
 
     match result {
         Ok(_) => Ok(Status::Created),
@@ -89,11 +97,14 @@ pub fn setting_set(
 }
 
 #[delete("/<key>")]
-pub fn setting_delete(state: &State<ServerState>, key: String) -> Result<(), HttpErrorJson> {
+pub async fn setting_delete(state: &State<ServerState>, key: String) -> Result<(), HttpErrorJson> {
     let setting_key = parse_key(key)?;
 
-    let datastore = endpoints_get_lock!(state.datastore);
-    let result = datastore.delete_key_value(&setting_key);
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let result = datastore.delete_key_value(&setting_key).await;
 
     match result {
         Ok(_) => Ok(()),

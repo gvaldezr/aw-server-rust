@@ -13,10 +13,19 @@ dirs = "6"
 serde = "1.0"
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-rusqlite = { version = "0.30", features = ["chrono", "serde_json", "bundled"]  }
-mpsc_requests = "0.3"
+# PostgreSQL dependencies
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-serde_json-1"] }
+deadpool-postgres = "0.10"
+thiserror = "1.0"
+tokio = { version = "1.0", features = ["full"] }
 log = "0.4"
+rand = "0.8"
+# SQLite (legacy import only)
+rusqlite = { version = "0.30", features = ["bundled", "chrono"] }
 
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 regex = "1"
+
+[dev-dependencies]
+testcontainers = "0.16"

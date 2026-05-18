@@ -1,0 +1,60 @@
+# Build artifacts
+target/
+**/*.rs.bk
+*.pdb
+
+# Development files
+.git/
+.gitignore
+.env
+.env.*
+
+# Documentation
+*.md
+!README.md
+docs/
+aidlc-docs/
+.aidlc-rule-details/
+
+# Web UI (not needed for aw-server image)
+aw-webui/node_modules/
+aw-webui/dist/
+aw-webui/build/
+aw-webui/.cache/
+
+# Docker files (avoid recursion)
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Secrets
+secrets/
+*.key
+*.crt
+*.pem
+
+# Logs
+*.log
+logs/
+
+# Testing
+coverage/
+.pytest_cache/
+.coverage
+
+# Temporary files
+tmp/
+temp/
+*.tmp

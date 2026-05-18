@@ -10,3 +10,18 @@ NDK
 *.sqlite*
 *.db
 *.db-journal
+
+# Docker secrets and environment files
+secrets/
+*.env
+.env*
+
+# Docker volumes and data
+docker/data/
+pg_data/
+
+# macOS files
+.DS_Store
+
+# AI-DLC documentation (optional, project-specific)
+.aidlc-rule-details/

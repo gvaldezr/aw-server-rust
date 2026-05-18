@@ -1,0 +1,188 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 15 Database
+  postgresql:
+    image: postgres:15-alpine
+    container_name: activitywatch-postgresql
+    restart: unless-stopped
+    
+    command: >
+      postgres
+      -c config_file=/etc/postgresql/postgresql.conf
+      -c password_encryption=md5
+    
+    environment:
+      POSTGRES_USER: aw_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: activitywatch
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+      # PostgreSQL performance tuning
+      POSTGRES_SHARED_BUFFERS: 4GB
+      POSTGRES_EFFECTIVE_CACHE_SIZE: 12GB
+      POSTGRES_MAX_CONNECTIONS: 50
+    
+    secrets:
+      - db_password
+    
+    volumes:
+      # Data persistence
+      - pg_data:/var/lib/postgresql/data
+      # Custom configuration
+      - ./docker/postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      # Optional: Custom init scripts
+      - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+    
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    
+    ports:
+      - "5432:5432"
+    
+    networks:
+      - internal
+    
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aw_user -d activitywatch"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 16G
+        reservations:
+          cpus: '2.0'
+          memory: 8G
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # ActivityWatch Server
+  aw-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        RUST_VERSION: "1.95"
+    image: activitywatch/aw-server:latest
+    container_name: activitywatch-server
+    restart: unless-stopped
+    
+    environment:
+      # Database connection
+      DB_HOST: postgresql
+      DB_PORT: 5432
+      DB_USER: aw_user
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      DB_NAME: activitywatch
+      
+      # Server configuration
+      AW_HOST: "0.0.0.0"
+      AW_PORT: 5600
+      
+      # Logging
+      RUST_LOG: info
+      DB_LOG_LEVEL: warn
+    
+    secrets:
+      - db_password
+    
+    ports:
+      - "5600:5600"
+    
+    networks:
+      - internal
+    
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5600/api/0/info"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+  # ActivityWatch Web UI
+  aw-webui:
+    build:
+      context: .
+      dockerfile: Dockerfile.webui
+      args:
+        WEBUI_VERSION: "master"
+    image: activitywatch/aw-webui:latest
+    container_name: activitywatch-webui
+    restart: unless-stopped
+    
+    ports:
+      - "8080:80"
+    
+    networks:
+      - internal
+    
+    depends_on:
+      aw-server:
+        condition: service_healthy
+    
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+    
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+# Networks
+networks:
+  internal:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/16
+
+# Volumes
+volumes:
+  pg_data:
+    driver: local
+
+# Secrets
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
