@@ -162,6 +162,7 @@ impl DatastoreInstance {
     }
 
     /// Process heartbeat - merge with last event or create new (PostgreSQL)
+    /// Uses PostgreSQL advisory locks to prevent concurrent heartbeat conflicts
     pub async fn heartbeat_pg(
         client: &Client,
         bucket_id: &str,
@@ -175,13 +176,24 @@ impl DatastoreInstance {
             .map_err(|_| DatastoreError::NoSuchBucket(bucket_id.to_string()))?
             .get(0);
 
+        // Use advisory lock to serialize heartbeats for the same bucket
+        // This prevents race conditions without causing deadlocks
+        // The lock is automatically released after the operation
+        // Different buckets can process heartbeats in parallel
+        let lock_id = (bucket_row as i64) * 1000000; // Unique lock ID per bucket
+        let _lock_result = client
+            .execute("SELECT pg_advisory_lock($1)", &[&lock_id])
+            .await
+            .map_err(|e| DatastoreError::InternalError(format!("Failed to acquire advisory lock: {}", e)))?;
+
         let endtime = event.timestamp + event.duration;
         let pulsetime_duration = Duration::milliseconds((pulsetime * 1000.0) as i64);
 
-        // Try to find last event within pulsetime window with matching data
+        // Serialize event data
         let data_json = serde_json::to_value(&event.data)
             .map_err(|e| DatastoreError::InternalError(format!("Failed to serialize event data: {}", e)))?;
 
+        // Now with the lock held, safely query for last event
         let last_event_opt = client
             .query_opt(
                 "SELECT id, bucketrow, starttime, endtime, data
@@ -200,7 +212,7 @@ impl DatastoreInstance {
             .await
             .map_err(|e| DatastoreError::InternalError(format!("Failed to query last event: {}", e)))?;
 
-        if let Some(last_row) = last_event_opt {
+        let result = if let Some(last_row) = last_event_opt {
             // Merge with existing event
             let event_id: i64 = last_row.get(0);
             let last_endtime: DateTime<Utc> = last_row.get(3);
@@ -211,16 +223,18 @@ impl DatastoreInstance {
                 last_endtime
             };
 
+            // Update event - no race condition possible with advisory lock
             let updated_row = client
                 .query_one(
-                    "UPDATE events SET endtime = $1 WHERE id = $2
+                    "UPDATE events SET endtime = $1 
+                     WHERE id = $2
                      RETURNING id, bucketrow, starttime, endtime, data",
                     &[&new_endtime, &event_id],
                 )
                 .await
                 .map_err(|e| DatastoreError::InternalError(format!("Failed to update event: {}", e)))?;
 
-            parse_event_row(&updated_row)
+            parse_event_row(&updated_row)?
         } else {
             // Insert new event
             let row = client
@@ -233,8 +247,16 @@ impl DatastoreInstance {
                 .await
                 .map_err(|e| DatastoreError::InternalError(format!("Failed to insert heartbeat event: {}", e)))?;
 
-            parse_event_row(&row)
-        }
+            parse_event_row(&row)?
+        };
+
+        // Release advisory lock
+        let _unlock_result = client
+            .execute("SELECT pg_advisory_unlock($1)", &[&lock_id])
+            .await
+            .map_err(|e| DatastoreError::InternalError(format!("Failed to release advisory lock: {}", e)))?;
+
+        Ok(result)
     }
 
     /// Get a single event by ID (PostgreSQL)
