@@ -1,0 +1,44 @@
+// Anáhuac Mayab Color Palette
+// Primary Colors
+$primary-color: #FF5900;           // Naranja Anáhuac (primary brand color)
+$primary-hover: #E04F00;           // Hover state
+$primary-light: #FFF0E8;           // Light background accent
+
+// Text Colors
+$text-primary: #040404;            // Títulos y texto importante
+$text-secondary: #262626;          // Texto secundario
+$text-muted: #9C9C9C;              // Texto deshabilitado
+$textColor: $text-primary;         // Override existing variable
+
+// Background Colors
+$background: #FFFFFF;              // Fondo principal
+$background-alt: #F5F5F5;          // Fondo alternativo
+$backgroundColor: $background;     // Override existing variable
+$surface: #FFFFFF;                 // Superficies elevadas
+
+// Border Colors
+$border: #E0E0E0;                  // Bordes estándar
+$border-dark: #9C9C9C;             // Bordes destacados
+$lightBorderColor: $border;        // Override existing variable
+
+// Semantic Colors
+$error: #D32F2F;                   // Errores
+$success: #388E3C;                 // Éxito
+$warning: #F57C00;                 // Advertencias
+$info: #1976D2;                    // Información
+
+// Active Highlight
+$activeHighlightColor: $primary-color;
+
+// Border Radius - Anáhuac Standards
+$border-radius-sm: 4px;            // Small (inputs, badges)
+$border-radius-md: 8px;            // Medium (buttons, small cards)
+$border-radius-lg: 12px;           // Large (large cards, modals, logo container)
+
+// Typography - Anáhuac Mayab
+$font-family-base: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+$font-family-headings: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+
+$font-weight-regular: 400;
+$font-weight-medium: 500;
+$font-weight-bold: 700;

@@ -1,0 +1,83 @@
+@import "globals";
+
+body,
+html,
+body,
+button {
+  color: $textColor;
+  font-family: $font-family-base;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5, h6, nav {
+  font-family: $font-family-headings;
+  font-weight: $font-weight-bold;
+}
+
+body {
+  background-color: $backgroundColor;
+}
+
+// To make icons a little less crowded
+.fa-icon {
+  margin-top: -0.125em;
+  margin-left: 4px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.aw-container {
+  background-color: #fff;
+  border: 1px solid $lightBorderColor;
+  border-radius: $border-radius-lg;
+}
+
+// Anáhuac Button Styles
+.btn-anahuac-primary {
+  background-color: $primary-color;
+  border-color: $primary-color;
+  color: #FFFFFF;
+  border-radius: $border-radius-md;
+  font-weight: $font-weight-medium;
+  padding: 12px 24px;
+  font-size: 16px;
+  transition: all 0.3s ease;
+  text-decoration: none;
+  display: inline-block;
+  
+  &:hover {
+    background-color: $primary-hover;
+    border-color: $primary-hover;
+    color: #FFFFFF;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    text-decoration: none;
+  }
+  
+  &:focus {
+    background-color: $primary-hover;
+    border-color: $primary-hover;
+    box-shadow: 0 0 0 0.2rem rgba(255, 89, 0, 0.25);
+    outline: none;
+  }
+}
+
+.btn-anahuac-outline {
+  background-color: transparent;
+  border: 2px solid $primary-color;
+  color: $primary-color;
+  border-radius: $border-radius-md;
+  font-weight: $font-weight-medium;
+  padding: 10px 22px;
+  text-decoration: none;
+  display: inline-block;
+  transition: all 0.3s ease;
+  
+  &:hover {
+    background-color: $primary-light;
+    border-color: $primary-hover;
+    color: $primary-hover;
+    text-decoration: none;
+  }
+}
