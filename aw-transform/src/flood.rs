@@ -42,7 +42,8 @@ pub fn flood(events: Vec<Event>, pulsetime: chrono::Duration) -> Vec<Event> {
     let mut retry_e: Option<Event> = None;
 
     // If negative gaps are smaller than this, prune them to become zero
-    let negative_gap_trim_thres = chrono::Duration::milliseconds(100);
+    // Increased from 100ms to 1000ms to handle timing discrepancies from watchers
+    let negative_gap_trim_thres = chrono::Duration::milliseconds(1000);
 
     let mut warned_negative_gap_safe = false;
     let mut warned_negative_gap_unsafe = false;

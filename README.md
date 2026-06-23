@@ -208,3 +208,18 @@ To allow access from other computers on your network:
 ### Syncing
 
 For details about aw-sync-rust, see the [README](./aw-sync/README.md) in its subdirectory.
+
+---
+
+## WebUI Customization Note
+
+The `aw-webui/` directory contains a customized version of the ActivityWatch WebUI with **Anáhuac Mayab institutional branding**. This includes custom logo, color palette (#FF5900 Naranja Anáhuac), typography (Inter font), and a redesigned home page.
+
+**Key Changes**:
+- Anáhuac Mayab logo and colors applied
+- Home page redesigned with Spanish content for Universidad Anáhuac Mayab
+- All functionality preserved - only visual customization
+
+**Documentation**: See [`aw-webui/README-CUSTOMIZATION.md`](./aw-webui/README-CUSTOMIZATION.md) for complete details on customizations, build instructions, and rollback procedures.
+
+**Build**: The `Dockerfile.webui` has been modified to use the local `aw-webui/` directory instead of cloning from GitHub.

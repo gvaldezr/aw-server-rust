@@ -171,8 +171,8 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 bucket::bucket_events_get,
                 bucket::bucket_events_create,
                 bucket::bucket_events_heartbeat,
-                bucket::bucket_event_count,
-                bucket::bucket_events_get_single,
+                bucket::bucket_event_count,        // MUST be before bucket_events_get_single
+                bucket::bucket_events_get_single,  // Generic route, goes after specific ones
                 bucket::bucket_events_delete_by_id,
                 bucket::bucket_export
             ],

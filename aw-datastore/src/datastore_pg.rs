@@ -45,7 +45,14 @@ impl DatastoreInstance {
             )
             .await
             .map_err(|e| {
-                if e.to_string().contains("duplicate key") || e.to_string().contains("unique constraint") {
+                let error_string = e.to_string();
+                let error_code = e.code().map(|c| c.code()).unwrap_or("NO_CODE");
+                debug!("Bucket creation error: {} | Code: {} | Full: {:?}", error_string, error_code, e);
+                
+                if error_string.contains("duplicate key") 
+                    || error_string.contains("unique constraint") 
+                    || error_code == "23505" {  // PostgreSQL unique violation code
+                    debug!("Detected duplicate bucket: {}", bucket.id);
                     DatastoreError::BucketAlreadyExists(bucket.id.clone())
                 } else {
                     DatastoreError::InternalError(format!("Failed to create bucket: {}", e))

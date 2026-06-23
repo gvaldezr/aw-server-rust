@@ -75,6 +75,11 @@ pub async fn bucket_new(
     let ret = datastore.create_bucket(&bucket).await;
     match ret {
         Ok(_) => Ok(()),
+        Err(aw_datastore::DatastoreError::BucketAlreadyExists(_)) => {
+            // Bucket already exists, treat as success (idempotent operation)
+            debug!("Bucket {} already exists, ignoring", bucket_id);
+            Ok(())
+        }
         Err(err) => {
             error!("Failed to create bucket {}: {:?}", bucket_id, err);
             Err(err.into())
@@ -126,6 +131,25 @@ pub async fn bucket_events_get(
     }
 }
 
+// IMPORTANT: Specific routes must come BEFORE generic routes to avoid forwarding warnings
+// Place /count before /<event_id> to prevent "count" from being parsed as an i64
+#[get("/<bucket_id>/events/count")]
+pub async fn bucket_event_count(
+    bucket_id: &str,
+    state: &State<ServerState>,
+) -> Result<Json<u64>, HttpErrorJson> {
+    let datastore = {
+        let ds = endpoints_get_lock!(state.datastore);
+        ds.clone()
+    };
+    let res = datastore.get_event_count(bucket_id, None, None).await;
+    match res {
+        Ok(eventcount) => Ok(Json(eventcount as u64)),
+        Err(err) => Err(err.into()),
+    }
+}
+
+// Generic route with lower priority to avoid matching "count" as an integer
 // Needs unused parameter, otherwise there'll be a route collision
 // See: https://api.rocket.rs/master/rocket/struct.Route.html#resolving-collisions
 #[get("/<bucket_id>/events/<event_id>?<_unused..>")]
@@ -181,22 +205,6 @@ pub async fn bucket_events_heartbeat(
     };
     match datastore.heartbeat(bucket_id, heartbeat, pulsetime).await {
         Ok(e) => Ok(Json(e)),
-        Err(err) => Err(err.into()),
-    }
-}
-
-#[get("/<bucket_id>/events/count")]
-pub async fn bucket_event_count(
-    bucket_id: &str,
-    state: &State<ServerState>,
-) -> Result<Json<u64>, HttpErrorJson> {
-    let datastore = {
-        let ds = endpoints_get_lock!(state.datastore);
-        ds.clone()
-    };
-    let res = datastore.get_event_count(bucket_id, None, None).await;
-    match res {
-        Ok(eventcount) => Ok(Json(eventcount as u64)),
         Err(err) => Err(err.into()),
     }
 }

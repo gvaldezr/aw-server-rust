@@ -1,6 +1,43 @@
 # AI-DLC State Tracking
 
+## Current Request (May 19, 2026)
+**Request**: Modify AW-webui visual design - change logo.png and customize landing page
+**Type**: UI/UX Enhancement (Brownfield)
+**Scope**: aw-webui component only (no queries or other components)
+**Status**: INCEPTION - Requirements Analysis
+
+## Previous Request (May 18, 2026) - ✅ COMPLETED
+**Request**: PostgreSQL migration, network binding, Docker deployment
+**Status**: Production Ready - All 25 steps completed and validated
+
+---
+
 ## Project Information
+- **Project Type**: Brownfield (Modification to existing component)
+- **Start Date**: 2026-05-19T00:00:00Z
+- **Current Stage**: INCEPTION - Requirements Analysis
+- **Current Unit**: N/A (Planning phase)
+- **Status**: 🔵 Analyzing requirements for WebUI visual customization
+
+## Workspace State
+- **Existing Code**: Yes (aw-server-rust with 7 member crates)
+- **Target Component**: aw-webui (currently cloned from GitHub during Docker build)
+- **Programming Languages**: 
+  - Backend: Rust
+  - WebUI: JavaScript/TypeScript (Vue.js framework - external repo)
+- **Build System**: 
+  - Backend: Cargo
+  - WebUI: npm/webpack (in separate repository)
+- **Project Structure**: Modular monorepo + external webui
+- **Workspace Root**: `/Users/guillermo.valdez/Documents/dti-timetracker-apps/aw-rust/aw-server-rust`
+
+## WebUI Current State
+- **Location**: External repository (https://github.com/ActivityWatch/aw-webui.git)
+- **Current Approach**: Cloned during Dockerfile.webui build from master branch
+- **Local Directory**: `aw-webui/` (currently empty, only has empty dist/ folder)
+- **Docker Integration**: Dockerfile.webui → nginx serving static files
+
+## Code Location Rules
 - **Project Type**: Brownfield
 - **Start Date**: 2026-05-18T00:00:00Z
 - **Current Stage**: CONSTRUCTION - Code Generation (Unit 1) - **COMPLETE**

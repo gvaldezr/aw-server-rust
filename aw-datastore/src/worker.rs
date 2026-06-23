@@ -205,8 +205,11 @@ impl Datastore {
         let result = DatastoreInstance::create_bucket_pg(&client, bucket).await;
         
         self.metrics.record_query("create_bucket", start.elapsed());
-        if result.is_err() {
-            self.metrics.record_error("create_bucket");
+        if let Err(ref e) = result {
+            // Don't record BucketAlreadyExists as an error (it's expected behavior)
+            if !matches!(e, DatastoreError::BucketAlreadyExists(_)) {
+                self.metrics.record_error("create_bucket");
+            }
         }
         
         result

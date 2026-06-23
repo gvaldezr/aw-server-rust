@@ -1,15 +1,11 @@
 # Multi-stage build for ActivityWatch WebUI
 FROM node:20-alpine AS builder
 
-# Install git
-RUN apk add --no-cache git
-
 # Set working directory
 WORKDIR /build
 
-# Clone aw-webui repository (master branch)
-ARG WEBUI_VERSION=master
-RUN git clone --depth 1 --branch ${WEBUI_VERSION} https://github.com/ActivityWatch/aw-webui.git .
+# Copy local customized aw-webui (Anáhuac Mayab branding)
+COPY aw-webui /build
 
 # Set Node options to enable crypto in webpack
 ENV NODE_OPTIONS="--openssl-legacy-provider"
