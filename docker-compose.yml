@@ -33,8 +33,6 @@ services:
       # Optional: Custom init scripts
       - ./docker/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     
-    command: postgres -c config_file=/etc/postgresql/postgresql.conf
-    
     ports:
       - "5432:5432"
     
