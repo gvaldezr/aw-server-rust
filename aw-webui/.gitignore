@@ -8,6 +8,8 @@ selenium-debug.log
 
 # copied from media
 static/logo*
+!static/logo.png
+!static/logo.svg
 
 # outputs
 coverage
